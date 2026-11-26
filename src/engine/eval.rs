@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use super::lexer::{Tok, Token, lex};
 use super::units::{self, UnitId};
-use super::value::{EvalResult, Fmt, UnitPow, Value};
+use super::value::{EvalResult, Fmt, UnitPow, Value, unit_string};
 
 /// Syntax-highlight category for a span of a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,8 @@ pub enum Hl {
     Function,
     Comment,
     Label,
+    /// A `?` line answered by Claude.
+    Ai,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,22 +133,162 @@ pub struct LineOutput {
     pub spans: Vec<(Range<usize>, Hl)>,
     /// The line refers to other lines or variables (sum, prev, line 2, x).
     pub aggregate: bool,
+    /// The line totals or averages lines above (sum, total, average).
+    pub summary: bool,
     /// Variable this line defines ("hourly rate = $45"), as written.
     pub defines: Option<String>,
+    /// The question on a `?` line.
+    pub question: Option<String>,
+    /// Text shown in the results column when there's no value (a non-numeric
+    /// answer from Claude, or "graph" on a plot line).
+    pub note: Option<String>,
+    /// Samples for a `plot` line.
+    pub plot: Option<Plot>,
 }
 
+/// A function graph from a line like `plot sin(x) from -pi to pi`.
+#[derive(Debug, Clone, Default)]
+pub struct Plot {
+    pub expr: String,
+    pub from: f64,
+    pub to: f64,
+    /// y values evenly spaced over `from..=to` (None where undefined).
+    pub ys: Vec<Option<f64>>,
+    pub unit: String,
+}
+
+/// Looks up Claude's answer for a question: (expression, short answer).
+pub type AiLookup<'a> = &'a dyn Fn(&str) -> Option<(String, String)>;
+
+#[cfg(test)]
 pub fn evaluate_document(text: &str) -> Vec<LineOutput> {
+    evaluate_document_with(text, &|_| None)
+}
+
+pub fn evaluate_document_with(text: &str, ai: AiLookup) -> Vec<LineOutput> {
     let mut scope = Scope::default();
     let mut out = Vec::new();
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        let output = evaluate_line(line, &mut scope);
+        let output = if let Some(question) = line.trim_start().strip_prefix('?') {
+            evaluate_question(line, question.trim(), ai, &mut scope)
+        } else if let Some(start) = plot_command(line) {
+            evaluate_plot(line, start, &mut scope)
+        } else {
+            evaluate_line(line, &mut scope)
+        };
         let is_break = line.trim().is_empty() || line.trim_start().starts_with('#');
         scope.results.push(output.value.clone());
         if is_break {
             scope.block_start = scope.results.len();
         }
         out.push(output);
+    }
+    out
+}
+
+/// `? question`: Claude's expression is evaluated here, in the sheet's
+/// scope, so the answer stays live when the variables it uses change.
+fn evaluate_question(line: &str, question: &str, ai: AiLookup, scope: &mut Scope) -> LineOutput {
+    let start = line.len() - line.trim_start().len();
+    let mut out = LineOutput {
+        spans: vec![(start..line.len(), Hl::Ai)],
+        question: (!question.is_empty()).then(|| question.to_string()),
+        ..Default::default()
+    };
+    if question.is_empty() {
+        return out;
+    }
+    if let Some((expr, answer)) = ai(question) {
+        let computed =
+            (!expr.is_empty() && !expr.contains('=')).then(|| evaluate_line(&expr, scope));
+        match computed {
+            Some(r) if r.display.is_some() => {
+                out.value = r.value;
+                out.display = r.display;
+                out.aggregate = r.aggregate;
+                out.summary = r.summary;
+            }
+            _ => out.note = Some(if answer.is_empty() { expr } else { answer }),
+        }
+    }
+    out
+}
+
+/// Byte offset of the expression on a `plot …` / `graph …` line.
+fn plot_command(line: &str) -> Option<usize> {
+    let t = line.trim_start();
+    let lead = line.len() - t.len();
+    ["plot ", "graph "].iter().find_map(|kw| {
+        t.get(..kw.len())
+            .filter(|head| head.eq_ignore_ascii_case(kw))
+            .map(|_| lead + kw.len())
+    })
+}
+
+const PLOT_SAMPLES: usize = 240;
+
+fn evaluate_plot(line: &str, start: usize, scope: &mut Scope) -> LineOutput {
+    let lead = line.len() - line.trim_start().len();
+    let mut out = LineOutput {
+        spans: vec![(lead..start - 1, Hl::Keyword)],
+        ..Default::default()
+    };
+    let rest = &line[start..];
+    let lower = rest.to_ascii_lowercase();
+    let (expr, range) = match lower.rfind(" from ") {
+        Some(i) => (&rest[..i], Some(&rest[i + 6..])),
+        None => (rest, None),
+    };
+    let (mut from, mut to) = (-10.0, 10.0);
+    if let Some(range) = range
+        && let Some(j) = range.to_ascii_lowercase().find(" to ")
+    {
+        let number = |s: &str, scope: &mut Scope| evaluate_line(s, scope).value.map(|v| v.shown());
+        if let (Some(a), Some(b)) = (number(&range[..j], scope), number(&range[j + 4..], scope))
+            && a.is_finite()
+            && b.is_finite()
+            && a != b
+        {
+            (from, to) = (a.min(b), a.max(b));
+        }
+    }
+    let expr = expr.trim();
+    if expr.is_empty() || expr.contains('=') {
+        return out;
+    }
+
+    let previous = scope.vars.get("x").cloned();
+    let mut unit = String::new();
+    let ys: Vec<Option<f64>> = (0..=PLOT_SAMPLES)
+        .map(|k| {
+            let x = from + (to - from) * k as f64 / PLOT_SAMPLES as f64;
+            scope.define("x", Value::num(x));
+            let value = evaluate_line(expr, scope).value?;
+            if unit.is_empty() {
+                unit = unit_string(&value.display);
+            }
+            Some(value.shown()).filter(|y| y.is_finite())
+        })
+        .collect();
+    match previous {
+        Some(v) => {
+            scope.vars.insert("x".into(), v);
+        }
+        None => {
+            scope.vars.remove("x");
+            scope.var_words.retain(|w| w.len() != 1 || w[0] != "x");
+        }
+    }
+    if ys.iter().any(Option::is_some) {
+        out.plot = Some(Plot {
+            expr: expr.to_string(),
+            from,
+            to,
+            ys,
+            unit,
+        });
+        out.note = Some("graph · Ctrl+G".into());
     }
     out
 }
@@ -239,6 +381,7 @@ fn evaluate_line(line: &str, scope: &mut Scope) -> LineOutput {
     if items.is_empty() {
         return output;
     }
+    output.summary = items.iter().any(|it| matches!(it, Item::Sum | Item::Avg));
     output.aggregate = items.iter().any(|it| {
         matches!(
             it,
@@ -954,6 +1097,32 @@ mod tests {
 
         let r = eval("x = 3\n2x + 1");
         assert_eq!(r[1].as_deref(), Some("7"));
+
+        let ai = |q: &str| match q {
+            "split rent 3 ways" => Some(("rent / 3".to_string(), "$400 each".to_string())),
+            "when is easter" => Some((String::new(), "April 5".to_string())),
+            _ => None,
+        };
+        let out = evaluate_document_with(
+            "rent = $1,200\n? split rent 3 ways\n? when is easter\n? unknown\nsum",
+            &ai,
+        );
+        assert_eq!(out[1].display.as_deref(), Some("$400.00"));
+        assert_eq!(out[1].question.as_deref(), Some("split rent 3 ways"));
+        assert_eq!(out[2].note.as_deref(), Some("April 5"));
+        assert_eq!(out[3].display, None);
+        assert_eq!(out[4].display.as_deref(), Some("$1,600.00"));
+
+        let out = evaluate_document("a = 2\nplot a * x^2 from -1 to 1\nx = 5\n2x");
+        let plot = out[1].plot.as_ref().expect("plot");
+        assert_eq!((plot.from, plot.to), (-1.0, 1.0));
+        assert_eq!(plot.ys.first().copied().flatten(), Some(2.0));
+        assert_eq!(plot.ys[PLOT_SAMPLES / 2], Some(0.0));
+        assert_eq!(out[3].display.as_deref(), Some("10"));
+        let out = evaluate_document("plot sqrt(x)");
+        let plot = out[0].plot.as_ref().unwrap();
+        assert_eq!((plot.from, plot.to), (-10.0, 10.0));
+        assert!(plot.ys[0].is_none() && plot.ys[PLOT_SAMPLES].is_some());
 
         let out = evaluate_document("Hourly Rate = $45\nhourly rate * 2\nbad = foo");
         assert_eq!(out[0].defines.as_deref(), Some("Hourly Rate"));

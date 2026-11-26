@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod ai;
 mod commands;
 mod editor;
 mod engine;

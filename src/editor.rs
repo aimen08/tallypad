@@ -1,6 +1,7 @@
 //! A multi-line text editor view whose right-hand column shows the result of
 //! each line, computed live by the engine.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -15,7 +16,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::engine::{self, Hl, LineOutput, Value};
+use crate::ai;
+use crate::engine::{self, Hl, LineOutput, Plot, Value};
 
 actions!(
     editor,
@@ -63,6 +65,7 @@ actions!(
         ZoomOut,
         ZoomReset,
         CancelCompletion,
+        AskAi,
     ]
 );
 
@@ -128,6 +131,12 @@ pub mod theme {
     pub fn comment() -> Rgba {
         rgb(0x5f6370)
     }
+    pub fn ai() -> Rgba {
+        rgb(0xb8a6ff)
+    }
+    pub fn error() -> Rgba {
+        rgb(0xff8a80)
+    }
     pub fn label() -> Rgba {
         rgb(0xa1a6b3)
     }
@@ -144,6 +153,7 @@ fn hl_color(hl: Option<Hl>) -> Hsla {
         Some(Hl::Function) => theme::function(),
         Some(Hl::Comment) => theme::comment(),
         Some(Hl::Label) => theme::label(),
+        Some(Hl::Ai) => theme::ai(),
     }
     .into()
 }
@@ -206,6 +216,13 @@ pub struct Editor {
     hovered_result: Option<usize>,
     completion: Option<Completion>,
     completion_boxes: Vec<(Bounds<Pixels>, usize)>,
+    /// Claude's answers by normalised question, plus in-flight and failed asks.
+    ai_cache: HashMap<String, ai::Answer>,
+    ai_pending: HashSet<String>,
+    ai_errors: HashMap<String, String>,
+    ai_model: String,
+    /// Cursor line at the last render; leaving a `?` line asks Claude.
+    last_line: usize,
 
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
@@ -284,6 +301,11 @@ impl Editor {
             hovered_result: None,
             completion: None,
             completion_boxes: Vec::new(),
+            ai_cache: ai::load_cache(),
+            ai_pending: HashSet::new(),
+            ai_errors: HashMap::new(),
+            ai_model: ai::load_model(),
+            last_line: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
@@ -305,6 +327,7 @@ impl Editor {
         }
         editor.selected_range = cursor..cursor;
         editor.autoscroll = true;
+        editor.last_line = editor.line_of(cursor);
         editor
     }
 
@@ -321,7 +344,12 @@ impl Editor {
         self.line_starts = std::iter::once(0)
             .chain(self.content.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
-        self.outputs = engine::evaluate_document(&self.content);
+        let cache = &self.ai_cache;
+        self.outputs = engine::evaluate_document_with(&self.content, &|q| {
+            cache
+                .get(&ai::cache_key(q))
+                .map(|a| (a.expression.clone(), a.answer.clone()))
+        });
     }
 
     fn line_count(&self) -> usize {
@@ -590,6 +618,205 @@ impl Editor {
             self.refresh_completion();
         } else {
             self.completion = None;
+        }
+    }
+
+    // -------------------------------------------------------------- AI ---
+
+    pub fn ai_model(&self) -> &str {
+        &self.ai_model
+    }
+
+    pub fn set_ai_model(&mut self, model: &str, cx: &mut Context<Self>) {
+        self.ai_model = model.to_string();
+        ai::save_model(model);
+        let name = ai::MODELS
+            .iter()
+            .find(|m| m.0 == model)
+            .map(|m| m.2)
+            .unwrap_or(model);
+        self.set_status(format!("Questions now go to {name}"), cx);
+    }
+
+    /// Re-asks questions that failed (e.g. after adding an API key).
+    pub fn retry_ai(&mut self, cx: &mut Context<Self>) {
+        let failed: Vec<usize> = (0..self.outputs.len())
+            .filter(|&i| {
+                self.outputs[i]
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| self.ai_errors.contains_key(&ai::cache_key(q)))
+            })
+            .collect();
+        self.ai_errors.clear();
+        for line in failed {
+            self.ask_ai(line, false, cx);
+        }
+        cx.notify();
+    }
+
+    /// The lines above `line`, with their results, as context for Claude.
+    fn ai_context(&self, line: usize) -> String {
+        let mut rows: Vec<String> = Vec::new();
+        let mut size = 0;
+        for i in (0..line).rev() {
+            let text = self.content[self.line_range(i)].trim();
+            if text.is_empty() {
+                continue;
+            }
+            let row = match self.outputs.get(i).and_then(|o| o.display.as_ref()) {
+                Some(d) => format!("{text} = {d}"),
+                None => text.to_string(),
+            };
+            size += row.len();
+            if size > 6000 || rows.len() >= 80 {
+                break;
+            }
+            rows.push(row);
+        }
+        rows.reverse();
+        rows.join("\n")
+    }
+
+    fn ask_ai(&mut self, line: usize, force: bool, cx: &mut Context<Self>) {
+        let Some(question) = self.outputs.get(line).and_then(|o| o.question.clone()) else {
+            return;
+        };
+        let key = ai::cache_key(&question);
+        if self.ai_pending.contains(&key) || (!force && self.ai_cache.contains_key(&key)) {
+            return;
+        }
+        let Some(api_key) = ai::api_key() else {
+            self.ai_errors
+                .insert(key, "add an API key in the AI menu".into());
+            cx.notify();
+            return;
+        };
+        let context = self.ai_context(line);
+        let model = self.ai_model.clone();
+        self.ai_errors.remove(&key);
+        self.ai_pending.insert(key.clone());
+        let task = cx
+            .background_executor()
+            .spawn(async move { ai::ask(&api_key, &model, &question, &context) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |editor, cx| {
+                editor.ai_pending.remove(&key);
+                match result {
+                    Ok(answer) => {
+                        editor.ai_cache.insert(key, answer);
+                        ai::save_cache(&editor.ai_cache);
+                        editor.recompute();
+                    }
+                    Err(err) => {
+                        editor.ai_errors.insert(key, err);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn ask_again(&mut self, _: &AskAi, _: &mut Window, cx: &mut Context<Self>) {
+        let line = self.line_of(self.cursor_offset());
+        if self.outputs.get(line).is_some_and(|o| o.question.is_some()) {
+            self.ask_ai(line, true, cx);
+        } else {
+            self.set_status("Start a line with ? to ask Claude", cx);
+        }
+    }
+
+    /// Results-column text for a line without a value: Claude's status or a
+    /// non-numeric answer.
+    fn line_note(&self, output: &LineOutput, is_cursor_line: bool) -> Option<(String, Hsla)> {
+        if let Some(note) = &output.note {
+            let color = if output.plot.is_some() {
+                theme::faint()
+            } else {
+                theme::accent()
+            };
+            return Some((note.clone(), color.into()));
+        }
+        let question = output.question.as_ref()?;
+        let key = ai::cache_key(question);
+        if self.ai_pending.contains(&key) {
+            return Some((
+                format!("asking {}…", ai::short_name(&self.ai_model)),
+                theme::ai().into(),
+            ));
+        }
+        if let Some(err) = self.ai_errors.get(&key) {
+            return Some((format!("⚠ {err}"), theme::error().into()));
+        }
+        if !self.ai_cache.contains_key(&key) {
+            let hint = if is_cursor_line {
+                "↵ ask Claude"
+            } else {
+                "Ctrl+Enter to ask"
+            };
+            return Some((hint.into(), theme::faint().into()));
+        }
+        None
+    }
+
+    /// What the graph panel shows for the cursor's position.
+    pub fn graph(&self) -> Graph {
+        let mut line = self.line_of(self.cursor_offset());
+        if let Some(plot) = self.outputs.get(line).and_then(|o| o.plot.clone()) {
+            return Graph::Plot(plot);
+        }
+        let is_break = |i: usize| {
+            let t = self.content[self.line_range(i)].trim();
+            t.is_empty() || t.starts_with('#')
+        };
+        // On a blank line right under a block, chart the block above.
+        if is_break(line) && line > 0 && !is_break(line - 1) {
+            line -= 1;
+            if let Some(plot) = self.outputs.get(line).and_then(|o| o.plot.clone()) {
+                return Graph::Plot(plot);
+            }
+        }
+        if is_break(line) {
+            return Graph::Empty;
+        }
+        let mut start = line;
+        while start > 0 && !is_break(start - 1) {
+            start -= 1;
+        }
+        let mut end = line;
+        while end + 1 < self.line_count() && !is_break(end + 1) {
+            end += 1;
+        }
+        let bars: Vec<(String, f64, String)> = (start..=end)
+            .filter_map(|i| {
+                let o = self.outputs.get(i)?;
+                if o.summary {
+                    return None;
+                }
+                let value = o.value.as_ref()?;
+                let display = o.display.clone()?;
+                let text = self.content[self.line_range(i)].trim();
+                let label = match (&o.defines, text.split_once(':')) {
+                    (Some(name), _) => name.as_str(),
+                    (None, Some((l, _))) if !l.trim().is_empty() => l.trim(),
+                    _ => text.trim_start_matches('?').trim(),
+                };
+                let label: String = if label.chars().count() > 18 {
+                    label.chars().take(17).chain(std::iter::once('…')).collect()
+                } else {
+                    label.to_string()
+                };
+                Some((label, value.shown(), display))
+            })
+            .collect();
+        if bars.is_empty() {
+            Graph::Empty
+        } else {
+            Graph::Bars(bars)
         }
     }
 
@@ -1250,6 +1477,15 @@ impl Editor {
     }
 }
 
+/// Data for the graph panel.
+pub enum Graph {
+    /// A `plot` line under the cursor.
+    Plot(Plot),
+    /// The values in the cursor's block: (label, number, formatted).
+    Bars(Vec<(String, f64, String)>),
+    Empty,
+}
+
 struct NameMatch {
     /// Byte offset in the typed text where the name starts.
     start: usize,
@@ -1538,6 +1774,12 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Leaving a `?` line asks Claude about it.
+        let line = self.line_of(self.cursor_offset());
+        if line != self.last_line {
+            let previous = std::mem::replace(&mut self.last_line, line);
+            self.ask_ai(previous, false, cx);
+        }
         let title = format!("{} — Tallypad", self.file_name());
         window.set_window_title(&title);
 
@@ -1594,6 +1836,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::cancel_completion))
+            .on_action(cx.listener(Self::ask_again))
             .child(
                 div()
                     .flex_1()
@@ -1804,7 +2047,9 @@ impl Element for EditorElement {
             });
             // Lines without a result are prose: only keep comment/label colours.
             let spans: Vec<(Range<usize>, Hl)> = match output {
-                Some(o) if o.display.is_some() => o.spans.clone(),
+                Some(o) if o.display.is_some() || o.question.is_some() || o.plot.is_some() => {
+                    o.spans.clone()
+                }
                 Some(o) => o
                     .spans
                     .iter()
@@ -1931,6 +2176,26 @@ impl Element for EditorElement {
                 results.push(LinePaint {
                     origin: point(x, y),
                     shaped: shaped_result,
+                });
+            } else if let Some((note, color)) =
+                output.and_then(|o| editor.line_note(o, i == cursor_line && is_focused))
+            {
+                let size_ = font_size * 0.86;
+                let run = TextRun {
+                    len: note.len(),
+                    font: font_.clone(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped_note = text_system.shape_line(note.into(), size_, &[run], None);
+                results.push(LinePaint {
+                    origin: point(
+                        (result_right - shaped_note.width).max(divider_x + px(10.)),
+                        y,
+                    ),
+                    shaped: shaped_note,
                 });
             }
 

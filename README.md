@@ -51,7 +51,22 @@ Tallypad is written entirely in **Rust**. It renders on the GPU with [GPUI](http
 | **Units** | `5 km in miles` · `72 °F to °C` · `60 km/h * 45 min` · `3 m * 4 m` · `2 GB in MB` |
 | **Live currencies** | `€250 in USD` · `$25/h * 8 h` · 35+ currencies with live rates, cached for offline use |
 | **Functions** | `sqrt`, `cbrt`, `abs`, `round`, `floor`, `ceil`, `sin`/`cos`/`tan` (with `deg`), `log`, `ln`, `exp`, `5!` |
+| **Ask Claude** | `? 3 pizzas at €14 shared by 7` · `? split rent 3 ways` · `? combien de secondes dans une semaine` |
+| **Graphs** | <kbd>Ctrl</kbd>+<kbd>G</kbd> charts the block you're in · `plot sin(x) * 2 from -pi to pi` |
 | **Number formats** | `5k`, `2M`, `1,500`, `0xFF` · `255 in hex` / `binary` / `octal` / `sci` |
+
+### Ask Claude (optional)
+
+Start a line with `?` and ask in plain words, in any language. When you leave the line, Tallypad sends the question and the lines above it to Claude, which replies with a Tallypad formula (`€14 * 3 / 7`, `rent / 3`). Tallypad evaluates that formula itself, so the answer counts toward totals and updates when your variables change. Answers that aren't numbers (a date, a name) are shown as text.
+
+- Pick **Claude Opus 5.5**, **Sonnet 5.5** or **Haiku 5.5** from the `✦` pill in the footer or the **AI** menu.
+- It uses your own [Anthropic API key](https://console.anthropic.com) (**AI → Set API Key…**), stored in Windows Credential Manager. `ANTHROPIC_API_KEY` works too.
+- Answers are cached in `%APPDATA%\Tallypad\ai-answers.json`, so a question is only sent once. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> asks again.
+- Nothing is sent unless a line starts with `?`.
+
+### Graphs
+
+<kbd>Ctrl</kbd>+<kbd>G</kbd> opens a graph panel. It charts the values in the block the cursor is in, or draws a function from a line like `plot x^2 from -3 to 3` (`x` is the variable; the range defaults to -10 to 10).
 
 It also has:
 
@@ -78,6 +93,8 @@ It also has:
 | Undo / Redo | <kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Ctrl</kbd>+<kbd>Y</kbd> |
 | Zoom in / out / reset | <kbd>Ctrl</kbd>+<kbd>=</kbd> · <kbd>Ctrl</kbd>+<kbd>-</kbd> · <kbd>Ctrl</kbd>+<kbd>0</kbd> |
 | Refresh exchange rates | <kbd>Ctrl</kbd>+<kbd>R</kbd> |
+| Show graph | <kbd>Ctrl</kbd>+<kbd>G</kbd> |
+| Ask Claude again (on a `?` line) | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> |
 | All shortcuts | <kbd>F1</kbd> |
 
 ## Install
@@ -111,6 +128,7 @@ Run the tests with `cargo test`. To regenerate the icon, run `python assets/make
 - `src/workspace.rs`: the title bar, menus, command palette, shortcuts/about sheets and footer.
 - `src/commands.rs`: a single table that generates the key bindings, menus, palette entries and shortcut sheet.
 - `src/rates.rs` / `src/updater.rs`: live exchange rates and GitHub Releases self-update.
+- `src/ai.rs`: `?` lines: the Messages API request, answer cache and API key storage.
 
 ## Credits
 

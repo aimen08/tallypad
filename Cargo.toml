@@ -22,3 +22,6 @@ embed-resource = "3.0.12"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Credentials", "Win32_Foundation"] }

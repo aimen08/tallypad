@@ -20,6 +20,13 @@ actions!(
         PaletteDown,
         PaletteConfirm,
         PaletteBackspace,
+        PalettePaste,
+        ToggleGraph,
+        UseOpus,
+        UseSonnet,
+        UseHaiku,
+        SetApiKey,
+        RemoveApiKey,
     ]
 );
 
@@ -28,17 +35,19 @@ pub enum Menu {
     File,
     Edit,
     View,
+    Ai,
     Help,
 }
 
 impl Menu {
-    pub const ALL: [Menu; 4] = [Menu::File, Menu::Edit, Menu::View, Menu::Help];
+    pub const ALL: [Menu; 5] = [Menu::File, Menu::Edit, Menu::View, Menu::Ai, Menu::Help];
 
     pub fn label(self) -> &'static str {
         match self {
             Menu::File => "File",
             Menu::Edit => "Edit",
             Menu::View => "View",
+            Menu::Ai => "AI",
             Menu::Help => "Help",
         }
     }
@@ -99,6 +108,14 @@ command_table! {
     #[sep] View "Zoom In" => ZoomIn, ["ctrl-=", "ctrl-+"], ED;
     View "Zoom Out" => ZoomOut, ["ctrl--"], ED;
     View "Reset Zoom" => ZoomReset, ["ctrl-0"], ED;
+    #[sep] View "Show Graph" => ToggleGraph, ["ctrl-g"], None;
+
+    Ai "Ask Claude Again" => AskAi, ["ctrl-enter"], ED;
+    #[sep] Ai "Use Claude Opus 5.5" => UseOpus, [], None;
+    Ai "Use Claude Sonnet 5.5" => UseSonnet, [], None;
+    Ai "Use Claude Haiku 5.5" => UseHaiku, [], None;
+    #[sep] Ai "Set API Key…" => SetApiKey, [], None;
+    Ai "Remove API Key" => RemoveApiKey, [], None;
 
     Help "Keyboard Shortcuts" => ShowShortcuts, ["f1", "ctrl-/"], None;
     #[sep] Help "Refresh Exchange Rates" => RefreshRates, ["ctrl-r"], None;
@@ -109,6 +126,7 @@ command_table! {
 
 /// Editing keys that aren't menu commands (shown on the shortcuts sheet).
 pub const EDITING_KEYS: &[(&str, &str)] = &[
+    ("Ask Claude", "start a line with ?"),
     ("Complete a variable", "tab"),
     ("Move by word", "ctrl-left / ctrl-right"),
     ("Select", "shift + arrows"),
@@ -157,6 +175,7 @@ pub fn editing_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", PaletteDown, Some("Palette")),
         KeyBinding::new("enter", PaletteConfirm, Some("Palette")),
         KeyBinding::new("backspace", PaletteBackspace, Some("Palette")),
+        KeyBinding::new("ctrl-v", PalettePaste, Some("Palette")),
     ]
 }
 
@@ -273,6 +292,8 @@ mod tests {
             cmds.iter()
                 .any(|c| c.name == "Command Palette" && c.keys[0] == "ctrl-k")
         );
-        assert!(bindings().len() >= cmds.len());
+        let keys: usize = cmds.iter().map(|c| c.keys.len()).sum();
+        assert_eq!(bindings().len(), keys);
+        assert!(cmds.iter().any(|c| c.menu == Menu::Ai));
     }
 }

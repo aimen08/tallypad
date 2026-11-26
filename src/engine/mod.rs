@@ -5,5 +5,5 @@ mod lexer;
 pub mod units;
 mod value;
 
-pub use eval::{Hl, LineOutput, evaluate_document};
+pub use eval::{Hl, LineOutput, Plot, evaluate_document_with};
 pub use value::Value;
