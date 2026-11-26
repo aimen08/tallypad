@@ -1,0 +1,6 @@
+/target
+/dist
+*.exe
+*.old
+# Local build settings (e.g. a short target-dir on deep Windows paths)
+/.cargo/config.toml

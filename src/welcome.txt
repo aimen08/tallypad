@@ -1,0 +1,38 @@
+# Welcome to Tallypad
+Write maths the way you think it. Answers appear on the right — click one to copy it.
+
+// Everyday sums
+Coffee: $4.50 * 5
+Lunch: $18 + 15% tip
+$1,200 rent + $150 utilities
+
+// Variables
+hourly rate = $45
+hours = 38
+weekly pay = hourly rate * hours
+weekly pay * 52
+
+// Percentages
+20% of $340
+$80 - 25%
+10% off $250
+15 as % of 60
+
+// Units & currencies
+5 km in miles
+72 °F to °C
+3 cups in ml
+€250 in USD
+60 km/h * 45 min
+2 GB / 4 MB
+
+// Totals
+Groceries: $82
+Gas: $45
+Phone: $35
+sum
+
+// Functions & more
+sqrt(144) + 2^8
+255 in hex
+line 5 * 2
