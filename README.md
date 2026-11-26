@@ -18,6 +18,8 @@
 <p align="center">
   <a href="https://github.com/aimen08/tallypad/actions/workflows/ci.yml"><img src="https://github.com/aimen08/tallypad/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/aimen08/tallypad/releases/latest"><img src="https://img.shields.io/github/v/release/aimen08/tallypad" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white" alt="Built with Rust">
+  <img src="https://img.shields.io/badge/RAM-~66%20MB-5fd4a0" alt="About 66 MB of RAM">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue" alt="Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license"></a>
 </p>
@@ -25,6 +27,18 @@
 ![Tallypad](docs/img/main.png)
 
 > **Inspired by Soulver.** [Soulver](https://soulver.app) is a great notepad calculator for Mac and iPhone. Tallypad is an independent open-source project that brings the same idea to Windows. It isn't affiliated with or endorsed by Soulver's makers.
+
+## Native Rust, small footprint
+
+Tallypad is written entirely in **Rust**. It renders on the GPU with [GPUI](https://gpui.rs), the framework behind the Zed editor. There's no Electron, no web view and no runtime to install.
+
+| | Tallypad 0.1.0 |
+|---|---|
+| Memory at idle | **~66 MB** working set |
+| Download | **one 9.6 MB `.exe`**, no installer |
+| Startup | opens instantly; rates and updates load in the background |
+
+<sub>Measured on Windows 11 with the release build and the welcome sheet open, after 15 seconds idle: working set 66 MB, private bytes 83 MB.</sub>
 
 ## Features
 
