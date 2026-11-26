@@ -131,6 +131,8 @@ pub struct LineOutput {
     pub spans: Vec<(Range<usize>, Hl)>,
     /// The line refers to other lines or variables (sum, prev, line 2, x).
     pub aggregate: bool,
+    /// Variable this line defines ("hourly rate = $45"), as written.
+    pub defines: Option<String>,
 }
 
 pub fn evaluate_document(text: &str) -> Vec<LineOutput> {
@@ -254,6 +256,7 @@ fn evaluate_line(line: &str, scope: &mut Scope) -> LineOutput {
     {
         if let Some(name) = assign {
             scope.define(&name, value.clone());
+            output.defines = Some(name);
         }
         output.display = Some(display);
         output.value = Some(value);
@@ -951,6 +954,11 @@ mod tests {
 
         let r = eval("x = 3\n2x + 1");
         assert_eq!(r[1].as_deref(), Some("7"));
+
+        let out = evaluate_document("Hourly Rate = $45\nhourly rate * 2\nbad = foo");
+        assert_eq!(out[0].defines.as_deref(), Some("Hourly Rate"));
+        assert_eq!(out[1].defines, None);
+        assert_eq!(out[2].defines, None);
     }
 
     #[test]

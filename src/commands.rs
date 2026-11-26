@@ -109,6 +109,7 @@ command_table! {
 
 /// Editing keys that aren't menu commands (shown on the shortcuts sheet).
 pub const EDITING_KEYS: &[(&str, &str)] = &[
+    ("Complete a variable", "tab"),
     ("Move by word", "ctrl-left / ctrl-right"),
     ("Select", "shift + arrows"),
     ("Delete word", "ctrl-backspace"),
@@ -150,6 +151,7 @@ pub fn editing_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", Newline, ED),
         KeyBinding::new("shift-enter", Newline, ED),
         KeyBinding::new("tab", Tab, ED),
+        KeyBinding::new("escape", CancelCompletion, ED),
         KeyBinding::new("escape", Dismiss, Some("Workspace")),
         KeyBinding::new("up", PaletteUp, Some("Palette")),
         KeyBinding::new("down", PaletteDown, Some("Palette")),

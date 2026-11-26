@@ -45,7 +45,7 @@ Tallypad is written entirely in **Rust**. It renders on the GPU with [GPUI](http
 | | Examples |
 |---|---|
 | **Plain-text maths** | `Lunch: $18 + 15% tip` · `$20 for taxi + $9 for coffee` · `// comments` · `# headings` |
-| **Variables** | `hourly rate = $45` then `hourly rate * 38` (names can be several words) |
+| **Variables** | `hourly rate = $45` then `hourly rate * 38` (names can be several words; type `hou` and press <kbd>Tab</kbd> to autocomplete) |
 | **References** | `sum`, `total`, `average` of the lines above · `prev` · `line 3` |
 | **Percentages** | `20% of $340` · `$80 - 25%` · `10% off $250` · `5% on 200` · `15 as % of 60` |
 | **Units** | `5 km in miles` · `72 °F to °C` · `60 km/h * 45 min` · `3 m * 4 m` · `2 GB in MB` |
@@ -60,7 +60,8 @@ It also has:
 - A **current-line highlight** that runs across both columns and slides when you move between lines, so it's clear which answer belongs to the line you're on.
 - **Click any answer to copy it.** Click the footer total to copy the total.
 - **Self-updating.** When a new release is out, an *Update* pill appears in the footer. One click downloads it and restarts the app.
-- **Autosave.** Your sheet is saved to `%APPDATA%\Tallypad\sheet.txt` as you type.
+- **Variable autocomplete.** Start typing a variable's name and a popup suggests matching variables with their values. <kbd>Tab</kbd> or <kbd>Enter</kbd> inserts one, <kbd>↑</kbd>/<kbd>↓</kbd> pick, <kbd>Esc</kbd> closes.
+- **Autosave.** Your sheet is saved as you type (the default one lives in `%APPDATA%\Tallypad\sheet.txt`). Tallypad reopens the last sheet you had open, with the cursor where you left it.
 
 <p>
   <img src="docs/img/palette.png" width="49%" alt="Command palette">

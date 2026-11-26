@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, Hitbox,
-    HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, PathPromptOptions, Pixels, Point, Render, ScrollWheelEvent,
-    ShapedLine, SharedString, Style, Task, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, div, fill, font, point, prelude::*, px, relative, rgba, size,
+    App, Bounds, BoxShadow, ClipboardItem, ContentMask, Context, CursorStyle, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId,
+    Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions, Pixels, Point, Render,
+    ScrollWheelEvent, ShapedLine, SharedString, Style, Task, TextRun, UTF16Selection,
+    UnderlineStyle, Window, actions, div, fill, font, point, prelude::*, px, relative, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -62,6 +62,7 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        CancelCompletion,
     ]
 );
 
@@ -75,6 +76,7 @@ const PAD_X: f32 = 18.0;
 const GUTTER: f32 = 34.0;
 const HL_SLIDE_SECS: f32 = 0.14;
 const HL_FADE_SECS: f32 = 0.28;
+const MAX_COMPLETIONS: usize = 6;
 
 pub mod theme {
     use gpui::{Rgba, rgb};
@@ -171,6 +173,20 @@ struct Metrics {
     max_scroll: Pixels,
 }
 
+/// Variable suggestions for the name being typed at the cursor.
+struct Completion {
+    /// Byte range of the partly typed name.
+    range: Range<usize>,
+    /// (name as defined, its current value).
+    items: Vec<(String, Option<String>)>,
+    selected: usize,
+    /// The typed text already is a complete name; Enter then keeps its
+    /// newline meaning unless another item was picked.
+    exact: bool,
+    /// Length (in chars) of the typed prefix, for highlighting.
+    typed_chars: usize,
+}
+
 pub struct Editor {
     focus_handle: FocusHandle,
     content: String,
@@ -188,6 +204,8 @@ pub struct Editor {
     metrics: Option<Metrics>,
     result_boxes: Vec<(Bounds<Pixels>, usize)>,
     hovered_result: Option<usize>,
+    completion: Option<Completion>,
+    completion_boxes: Vec<(Bounds<Pixels>, usize)>,
 
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
@@ -210,10 +228,24 @@ pub struct Editor {
 use crate::data_dir;
 
 const WELCOME: &str = include_str!("welcome.txt");
+/// Remembers which sheet was open (and the cursor) between launches.
+const LAST_SHEET_FILE: &str = "last-sheet.txt";
+
+/// The sheet that was open when Tallypad last saved, if it still exists.
+fn last_sheet() -> Option<(PathBuf, usize)> {
+    let state = std::fs::read_to_string(data_dir().join(LAST_SHEET_FILE)).ok()?;
+    let mut lines = state.lines();
+    let path = PathBuf::from(lines.next()?.trim());
+    let cursor = lines
+        .next()
+        .and_then(|c| c.trim().parse().ok())
+        .unwrap_or(0);
+    path.is_file().then_some((path, cursor))
+}
 
 impl Editor {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let path = data_dir().join("sheet.txt");
+        let (path, cursor) = last_sheet().unwrap_or_else(|| (data_dir().join("sheet.txt"), 0));
         let content = std::fs::read_to_string(&path)
             .map(|s| s.replace("\r\n", "\n"))
             .unwrap_or_else(|_| WELCOME.to_string());
@@ -250,6 +282,8 @@ impl Editor {
             metrics: None,
             result_boxes: Vec::new(),
             hovered_result: None,
+            completion: None,
+            completion_boxes: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
@@ -265,6 +299,12 @@ impl Editor {
             _blink_task: blink_task,
         };
         editor.set_content(content);
+        let mut cursor = cursor.min(editor.content.len());
+        while !editor.content.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        editor.selected_range = cursor..cursor;
+        editor.autoscroll = true;
         editor
     }
 
@@ -431,6 +471,7 @@ impl Editor {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.completion = None;
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.goal_x = None;
@@ -440,6 +481,7 @@ impl Editor {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.completion = None;
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -542,7 +584,77 @@ impl Editor {
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
+        let was_open = self.completion.is_some();
         self.after_edit(cx);
+        if kind == EditKind::Typing || (kind == EditKind::Deleting && was_open) {
+            self.refresh_completion();
+        } else {
+            self.completion = None;
+        }
+    }
+
+    // ------------------------------------------------------ completion ---
+
+    /// Suggests variables defined above the cursor whose names start with
+    /// the word(s) just typed.
+    fn refresh_completion(&mut self) {
+        self.completion = None;
+        if !self.selected_range.is_empty() || self.marked_range.is_some() {
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let line = self.line_of(cursor);
+        let start = self.line_starts[line];
+        // Later definitions win; keep the most recent value.
+        let mut vars: Vec<(String, Option<String>)> = Vec::new();
+        for output in self.outputs.iter().take(line) {
+            if let Some(name) = &output.defines {
+                let key = name.to_lowercase();
+                vars.retain(|(n, _)| n.to_lowercase() != key);
+                vars.push((name.clone(), output.display.clone()));
+            }
+        }
+        if vars.is_empty() {
+            return;
+        }
+        let names: Vec<&str> = vars.iter().map(|(n, _)| n.as_str()).collect();
+        if let Some(m) = match_names(&self.content[start..cursor], &names) {
+            self.completion = Some(Completion {
+                range: start + m.start..cursor,
+                items: m.items.iter().map(|&i| vars[i].clone()).collect(),
+                selected: 0,
+                exact: m.exact,
+                typed_chars: self.content[start + m.start..cursor].chars().count(),
+            });
+        }
+    }
+
+    fn accept_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(c) = self.completion.take() else {
+            return false;
+        };
+        let name = c.items[c.selected].0.clone();
+        self.replace(c.range, &name, EditKind::Other, cx);
+        true
+    }
+
+    fn move_completion(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some(c) = self.completion.as_mut() else {
+            return false;
+        };
+        let n = c.items.len() as isize;
+        c.selected = (c.selected as isize + delta).rem_euclid(n) as usize;
+        self.touch();
+        cx.notify();
+        true
+    }
+
+    fn cancel_completion(&mut self, _: &CancelCompletion, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completion.take().is_some() {
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
     }
 
     fn after_edit(&mut self, cx: &mut Context<Self>) {
@@ -579,6 +691,7 @@ impl Editor {
         self.selection_reversed = false;
         self.marked_range = None;
         self.last_edit = None;
+        self.completion = None;
         self.after_edit(cx);
     }
 
@@ -597,7 +710,12 @@ impl Editor {
         if let Some(dir) = self.path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        std::fs::write(&self.path, &self.content).is_ok()
+        let ok = std::fs::write(&self.path, &self.content).is_ok();
+        if ok {
+            let state = format!("{}\n{}\n", self.path.display(), self.cursor_offset());
+            let _ = std::fs::write(data_dir().join(LAST_SHEET_FILE), state);
+        }
+        ok
     }
 
     /// Puts the cursor at the end of `line` (0-based).
@@ -699,10 +817,16 @@ impl Editor {
     }
 
     fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.move_completion(-1, cx) {
+            return;
+        }
         self.move_vertical(-1, false, window, cx);
     }
 
     fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.move_completion(1, cx) {
+            return;
+        }
         self.move_vertical(1, false, window, cx);
     }
 
@@ -795,11 +919,20 @@ impl Editor {
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
+        self.completion = None;
         self.touch();
         cx.notify();
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = &self.completion {
+            // "hours" typed in full: Enter is a newline unless the user
+            // arrowed to a longer name like "hours worked".
+            if !(c.exact && c.selected == 0) && self.accept_completion(cx) {
+                return;
+            }
+            self.completion = None;
+        }
         // Keep the indentation of the current line.
         let range = self.line_range(self.line_of(self.cursor_offset()));
         let text = &self.content[range];
@@ -811,6 +944,9 @@ impl Editor {
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.accept_completion(cx) {
+            return;
+        }
         self.insert("    ", cx);
     }
 
@@ -1012,6 +1148,17 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        if let Some(&(_, i)) = self
+            .completion_boxes
+            .iter()
+            .find(|(b, _)| b.contains(&event.position))
+            && let Some(c) = self.completion.as_mut()
+            && i < c.items.len()
+        {
+            c.selected = i;
+            self.accept_completion(cx);
+            return;
+        }
         if let Some(line) = self.result_at(event.position) {
             self.copy_result(line, cx);
             return;
@@ -1101,6 +1248,66 @@ impl Editor {
         }
         acc.and_then(|v| v.format().ok()).map(|s| (label, s))
     }
+}
+
+struct NameMatch {
+    /// Byte offset in the typed text where the name starts.
+    start: usize,
+    /// Indices of matching names, best first.
+    items: Vec<usize>,
+    /// The typed text is itself one of the names.
+    exact: bool,
+}
+
+/// Matches the end of `before` (the line up to the cursor) against variable
+/// names, case-insensitively. Multi-word names match across spaces, so
+/// "hourly r" suggests "hourly rate".
+fn match_names(before: &str, names: &[&str]) -> Option<NameMatch> {
+    if before.is_empty() || before.ends_with(char::is_whitespace) {
+        return None;
+    }
+    if before.trim_start().starts_with('#')
+        || before.contains("//")
+        || before.matches('"').count() % 2 == 1
+    {
+        return None;
+    }
+    let lower = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<String>();
+    let names_lower: Vec<String> = names.iter().map(|n| lower(n)).collect();
+    let mut prev: Option<char> = None;
+    for (i, c) in before.char_indices() {
+        let boundary = c.is_alphabetic() && !prev.is_some_and(|p| p.is_alphanumeric() || p == '_');
+        prev = Some(c);
+        if !boundary || before.len() - i > 64 {
+            continue;
+        }
+        let typed = lower(&before[i..]);
+        let mut items: Vec<usize> = (0..names.len())
+            .filter(|&k| names_lower[k].starts_with(&typed))
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        let exact = items.iter().any(|&k| names_lower[k] == typed);
+        if exact && items.len() == 1 {
+            return None;
+        }
+        // Exact match first, then shorter names, then alphabetical.
+        items.sort_by_key(|&k| {
+            (
+                names_lower[k] != typed,
+                names[k].len(),
+                names_lower[k].clone(),
+            )
+        });
+        items.truncate(MAX_COMPLETIONS);
+        return Some(NameMatch {
+            start: i,
+            items,
+            exact,
+        });
+    }
+    None
 }
 
 fn char_class(c: char) -> u8 {
@@ -1276,6 +1483,7 @@ impl EntityInputHandler for Editor {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         self.record_undo(EditKind::Typing);
+        self.completion = None;
         self.content.replace_range(range.clone(), new_text);
         self.marked_range =
             (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
@@ -1385,6 +1593,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
+            .on_action(cx.listener(Self::cancel_completion))
             .child(
                 div()
                     .flex_1()
@@ -1413,7 +1622,18 @@ struct LinePaint {
     origin: Point<Pixels>,
 }
 
+/// The variable-completion popup under the cursor.
+struct Popup {
+    bounds: Bounds<Pixels>,
+    bg: PaintQuad,
+    selected: Option<PaintQuad>,
+    rows: Vec<LinePaint>,
+    row_height: Pixels,
+    hitbox: Hitbox,
+}
+
 pub struct PrepaintState {
+    popup: Option<Popup>,
     lines: Vec<LinePaint>,
     gutter: Vec<LinePaint>,
     results: Vec<LinePaint>,
@@ -1567,6 +1787,7 @@ impl Element for EditorElement {
         let mut selections = Vec::new();
         let mut result_rects = Vec::new();
         let mut cursor = None;
+        let mut popup_anchor = None;
 
         let text_system = window.text_system().clone();
         let space_w = px(BASE_FONT_SIZE * zoom * 0.35);
@@ -1622,6 +1843,15 @@ impl Element for EditorElement {
             }
 
             if i == cursor_line {
+                if let Some(c) = &editor.completion
+                    && c.range.start >= range.start
+                    && c.range.end <= range.end
+                {
+                    popup_anchor = Some((
+                        text_left + shaped.x_for_index(c.range.start - range.start),
+                        y,
+                    ));
+                }
                 if show_cursor {
                     let x = shaped.x_for_index(cursor_offset - range.start);
                     let inset = (line_height * 0.18).round();
@@ -1752,6 +1982,103 @@ impl Element for EditorElement {
             .map(|(r, _)| window.insert_hitbox(*r, HitboxBehavior::Normal))
             .collect();
 
+        // Completion popup: below the typed name, or above it near the bottom.
+        let mut popup = None;
+        let mut completion_boxes = Vec::new();
+        if let (Some(c), Some((ax, ay)), true) = (&editor.completion, popup_anchor, is_focused) {
+            let row_height = (line_height * 0.9).round();
+            let name_size = font_size * 0.92;
+            let value_size = font_size * 0.8;
+            let pad = px(5.);
+            let mut bold = font_.clone();
+            bold.weight = gpui::FontWeight::SEMIBOLD;
+            let run = |len: usize, font: &Font, color: Hsla| TextRun {
+                len,
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped_rows: Vec<(ShapedLine, Option<ShapedLine>)> = c
+                .items
+                .iter()
+                .map(|(name, value)| {
+                    let split = name
+                        .char_indices()
+                        .nth(c.typed_chars)
+                        .map(|(b, _)| b)
+                        .unwrap_or(name.len());
+                    let runs: Vec<TextRun> = [
+                        run(split, &bold, theme::accent().into()),
+                        run(name.len() - split, &font_, theme::text().into()),
+                    ]
+                    .into_iter()
+                    .filter(|r| r.len > 0)
+                    .collect();
+                    let n = text_system.shape_line(name.clone().into(), name_size, &runs, None);
+                    let v = value.as_ref().map(|v| {
+                        text_system.shape_line(
+                            v.clone().into(),
+                            value_size,
+                            &[run(v.len(), &font_, theme::muted().into())],
+                            None,
+                        )
+                    });
+                    (n, v)
+                })
+                .collect();
+            let content_w = shaped_rows
+                .iter()
+                .map(|(n, v)| n.width + v.as_ref().map(|v| v.width + px(28.)).unwrap_or_default())
+                .fold(px(170.), |a, b| a.max(b));
+            let width = (content_w + pad * 2. + px(16.)).min(bounds.size.width - px(16.));
+            let height = row_height * shaped_rows.len() as f32 + pad * 2.;
+            let x = (ax - px(12.))
+                .min(bounds.right() - width - px(8.))
+                .max(bounds.left() + px(8.));
+            let below = ay + line_height + px(2.);
+            let y = if below + height > bounds.bottom() - px(4.) {
+                (ay - height - px(2.)).max(bounds.top())
+            } else {
+                below
+            };
+            let popup_bounds = Bounds::new(point(x, y), size(width, height));
+            let mut selected = None;
+            let mut rows = Vec::new();
+            for (k, (n, v)) in shaped_rows.into_iter().enumerate() {
+                let row_y = y + pad + row_height * k as f32;
+                let row = Bounds::new(point(x + pad, row_y), size(width - pad * 2., row_height));
+                completion_boxes.push((row, k));
+                if k == c.selected {
+                    let mut tint: Hsla = theme::accent().into();
+                    tint.a = 0.16;
+                    selected = Some(fill(row, tint).corner_radii(px(5.)));
+                }
+                rows.push(LinePaint {
+                    origin: point(x + pad + px(8.), row_y),
+                    shaped: n,
+                });
+                if let Some(v) = v {
+                    rows.push(LinePaint {
+                        origin: point(x + width - pad - px(8.) - v.width, row_y),
+                        shaped: v,
+                    });
+                }
+            }
+            popup = Some(Popup {
+                bounds: popup_bounds,
+                bg: fill(popup_bounds, rgba(0x25272dff))
+                    .corner_radii(px(8.))
+                    .border_widths(px(1.))
+                    .border_color(rgba(0x3a3d45ff)),
+                selected,
+                rows,
+                row_height,
+                hitbox: window.insert_hitbox(popup_bounds, HitboxBehavior::Normal),
+            });
+        }
+
         let metrics = Metrics {
             bounds,
             text_left,
@@ -1767,9 +2094,11 @@ impl Element for EditorElement {
             editor.hl_to = target;
             editor.hl_start = hl_start;
             editor.result_boxes = result_rects;
+            editor.completion_boxes = completion_boxes;
         });
 
         PrepaintState {
+            popup,
             lines,
             gutter,
             results,
@@ -1808,6 +2137,9 @@ impl Element for EditorElement {
         window.set_cursor_style(CursorStyle::IBeam, &state.text_hitbox);
         for hitbox in &state.result_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
+        if let Some(p) = &state.popup {
+            window.set_cursor_style(CursorStyle::PointingHand, &p.hitbox);
         }
 
         let line_height = state.line_height;
@@ -1857,6 +2189,62 @@ impl Element for EditorElement {
                     }
                 },
             );
+
+            if let Some(p) = state.popup.take() {
+                window.paint_shadows(
+                    p.bounds,
+                    px(8.).into(),
+                    &[BoxShadow {
+                        color: gpui::hsla(0., 0., 0., 0.45),
+                        offset: point(px(0.), px(6.)),
+                        blur_radius: px(18.),
+                        spread_radius: px(0.),
+                    }],
+                );
+                window.paint_quad(p.bg);
+                if let Some(q) = p.selected {
+                    window.paint_quad(q);
+                }
+                for r in &p.rows {
+                    r.shaped.paint(r.origin, p.row_height, window, cx).ok();
+                }
+            }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_names;
+
+    fn names(before: &str) -> Option<(usize, Vec<&'static str>, bool)> {
+        const VARS: &[&str] = &["hourly rate", "hours", "hours worked", "Rent", "x"];
+        match_names(before, VARS)
+            .map(|m| (m.start, m.items.iter().map(|&i| VARS[i]).collect(), m.exact))
+    }
+
+    #[test]
+    fn completes_variable_prefixes() {
+        assert_eq!(
+            names("hou"),
+            Some((0, vec!["hours", "hourly rate", "hours worked"], false))
+        );
+        assert_eq!(
+            names("pay * hourly r"),
+            Some((6, vec!["hourly rate"], false))
+        );
+        assert_eq!(names("$5 + re"), Some((5, vec!["Rent"], false)));
+        // A complete name with longer siblings still offers them.
+        assert_eq!(
+            names("hours"),
+            Some((0, vec!["hours", "hours worked"], true))
+        );
+        // Complete and unique, a trailing space, comments: nothing.
+        assert_eq!(names("rent"), None);
+        assert_eq!(names("hourly "), None);
+        assert_eq!(names("// hou"), None);
+        assert_eq!(names("# hou"), None);
+        assert_eq!(names("2hou"), None);
+        assert_eq!(names("zz"), None);
     }
 }
