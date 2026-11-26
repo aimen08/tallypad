@@ -721,13 +721,26 @@ impl Editor {
         cx.notify();
     }
 
+    /// Ctrl+Enter: re-asks a `?` line, or turns any other line into one
+    /// ("20 added 30" -> "? 20 added 30") and asks Claude.
     fn ask_again(&mut self, _: &AskAi, _: &mut Window, cx: &mut Context<Self>) {
         let line = self.line_of(self.cursor_offset());
         if self.outputs.get(line).is_some_and(|o| o.question.is_some()) {
             self.ask_ai(line, true, cx);
-        } else {
-            self.set_status("Start a line with ? to ask Claude", cx);
+            return;
         }
+        let range = self.line_range(line);
+        let text = &self.content[range.clone()];
+        if text.trim().is_empty() {
+            self.set_status("Type a question, then press Ctrl+Enter", cx);
+            return;
+        }
+        let indent = text.len() - text.trim_start().len();
+        let at = range.start + indent;
+        let cursor = self.cursor_offset() + 2;
+        self.replace(at..at, "? ", EditKind::Other, cx);
+        self.selected_range = cursor..cursor;
+        self.ask_ai(line, true, cx);
     }
 
     /// Results-column text for a line without a value: Claude's status or a
@@ -740,6 +753,12 @@ impl Editor {
                 theme::accent()
             };
             return Some((note.clone(), color.into()));
+        }
+        if output.unclear && output.question.is_none() {
+            return Some((
+                "not sure · Ctrl+Enter asks Claude".into(),
+                theme::faint().into(),
+            ));
         }
         let question = output.question.as_ref()?;
         let key = ai::cache_key(question);

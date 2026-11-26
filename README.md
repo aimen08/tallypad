@@ -61,7 +61,7 @@ Start a line with `?` and ask in plain words, in any language. When you leave th
 
 - Pick **Claude Opus 5.5**, **Sonnet 5.5** or **Haiku 5.5** from the `✦` pill in the footer or the **AI** menu.
 - It uses your own [Anthropic API key](https://console.anthropic.com) (**AI → Set API Key…**), stored in Windows Credential Manager. `ANTHROPIC_API_KEY` works too.
-- Answers are cached in `%APPDATA%\Tallypad\ai-answers.json`, so a question is only sent once. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> asks again.
+- Answers are cached in `%APPDATA%\Tallypad\ai-answers.json`, so a question is only sent once. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> asks again, or turns any line into a `?` line and asks. Lines the calculator can't make sense of say so instead of showing a wrong answer.
 - Nothing is sent unless a line starts with `?`.
 
 ### Graphs
@@ -94,7 +94,7 @@ It also has:
 | Zoom in / out / reset | <kbd>Ctrl</kbd>+<kbd>=</kbd> · <kbd>Ctrl</kbd>+<kbd>-</kbd> · <kbd>Ctrl</kbd>+<kbd>0</kbd> |
 | Refresh exchange rates | <kbd>Ctrl</kbd>+<kbd>R</kbd> |
 | Show graph | <kbd>Ctrl</kbd>+<kbd>G</kbd> |
-| Ask Claude again (on a `?` line) | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> |
+| Ask Claude about the current line | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> |
 | All shortcuts | <kbd>F1</kbd> |
 
 ## Install

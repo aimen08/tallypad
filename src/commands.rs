@@ -110,7 +110,7 @@ command_table! {
     View "Reset Zoom" => ZoomReset, ["ctrl-0"], ED;
     #[sep] View "Show Graph" => ToggleGraph, ["ctrl-g"], None;
 
-    Ai "Ask Claude Again" => AskAi, ["ctrl-enter"], ED;
+    Ai "Ask Claude" => AskAi, ["ctrl-enter"], ED;
     #[sep] Ai "Use Claude Opus 5.5" => UseOpus, [], None;
     Ai "Use Claude Sonnet 5.5" => UseSonnet, [], None;
     Ai "Use Claude Haiku 5.5" => UseHaiku, [], None;

@@ -135,6 +135,9 @@ pub struct LineOutput {
     pub aggregate: bool,
     /// The line totals or averages lines above (sum, total, average).
     pub summary: bool,
+    /// Numbers were left over that the parser couldn't connect
+    /// ("20 added 30"), so no answer is shown.
+    pub unclear: bool,
     /// Variable this line defines ("hourly rate = $45"), as written.
     pub defines: Option<String>,
     /// The question on a `?` line.
@@ -394,6 +397,16 @@ fn evaluate_line(line: &str, scope: &mut Scope) -> LineOutput {
         scope,
     };
     let value = parser.parse_expr(0);
+    let leftover = items[parser.pos.min(items.len())..].iter().any(|it| {
+        matches!(
+            it,
+            Item::Num(_) | Item::Var(_) | Item::Const(_) | Item::Line(_) | Item::Prev
+        )
+    });
+    if leftover {
+        output.unclear = true;
+        return output;
+    }
     if let Ok(value) = value
         && let Ok(display) = value.format()
     {
@@ -1123,6 +1136,11 @@ mod tests {
         let plot = out[0].plot.as_ref().unwrap();
         assert_eq!((plot.from, plot.to), (-10.0, 10.0));
         assert!(plot.ys[0].is_none() && plot.ys[PLOT_SAMPLES].is_some());
+
+        let out = evaluate_document("what's 20 added 30\n20 plus 30\n$20 for taxi + $9 for coffee");
+        assert!(out[0].unclear && out[0].display.is_none());
+        assert_eq!(out[1].display.as_deref(), Some("50"));
+        assert_eq!(out[2].display.as_deref(), Some("$29.00"));
 
         let out = evaluate_document("Hourly Rate = $45\nhourly rate * 2\nbad = foo");
         assert_eq!(out[0].defines.as_deref(), Some("Hourly Rate"));
