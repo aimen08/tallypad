@@ -77,6 +77,10 @@
     }
     .shot img { display: block; width: 100%; height: auto; }
 
+    .demo { margin: 0 auto; max-width: 1040px; border-radius: 14px; overflow: hidden; border: 1px solid var(--line);
+      background: #0e0f11; box-shadow: 0 30px 90px rgba(0,0,0,.5); }
+    .demo video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; }
+
     section { padding: 84px 0 0; }
     h2 { font-size: clamp(26px, 3.6vw, 36px); letter-spacing: -0.02em; margin: 0 0 10px; }
     .sub { color: var(--muted); margin: 0 0 34px; max-width: 640px; }
@@ -132,6 +136,7 @@
     <nav>
       <a class="brand" href="#"><img src="img/tallypad-512.png" alt="">Tallypad</a>
       <div class="links">
+        <a class="hide-sm" href="#demo">Demo</a>
         <a class="hide-sm" href="#features">Features</a>
         <a class="hide-sm" href="#shortcuts">Shortcuts</a>
         <a href="https://github.com/aimen08/tallypad">GitHub</a>
@@ -158,6 +163,17 @@
       </div>
       <div class="shot"><img src="img/main.png" alt="Tallypad window: calculations on the left, answers on the right" width="940" height="661"></div>
     </header>
+
+    <section id="demo">
+      <h2>See it in action</h2>
+      <p class="sub">35 seconds: everyday sums, units and currencies, variables with autocomplete, asking Claude, and graphs.</p>
+      <div class="demo">
+        <video controls muted playsinline preload="metadata" poster="video/demo-poster.jpg" width="1920" height="1080">
+          <source src="video/demo.mp4" type="video/mp4">
+          <a href="video/demo.mp4">Watch the Tallypad demo video</a>
+        </video>
+      </div>
+    </section>
 
     <section id="features">
       <h2>Ask it like you'd ask a person</h2>
